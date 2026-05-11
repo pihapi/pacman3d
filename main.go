@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"log"
 	"math"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -24,59 +27,76 @@ func init() {
 }
 
 const (
-	screenW   = 900
-	screenH   = 700
-	cellSize  = 34.0
-	wallH     = 22.0
-	maxTilt   = 0.4
-	tiltSpeed = 0.011
-	tiltDamp  = 0.86
-	grav      = 1400.0
-	friction  = 0.85
-	pacRadius = 10.0
+	screenW = 900
+	screenH = 700
 )
 
-var maze = []string{
-	"####################",
-	"#........##........#",
-	"#.##.###.##.###.##.#",
-	"#.##.###.##.###.##.#",
-	"#..................#",
-	"#.##.#.######.#.##.#",
-	"#....#...##...#....#",
-	"####.###.##.###.####",
-	"#..................#",
-	"#.##.##.####.##.##.#",
-	"#....##.####.##....#",
-	"#.##....GGGG....##.#",
-	"#.##.##.####.##.##.#",
-	"#..................#",
-	"####.###.##.###.####",
-	"#....#...##...#....#",
-	"#.##.#.######.#.##.#",
-	"#..................#",
-	"#.##.###.##.###.##.#",
-	"#.......P..........#",
-	"####################",
+type Config struct {
+	CellSize    float64
+	WallH       float64
+	PacRadius   float64
+	Gravity     float64
+	Friction    float64
+	MaxSpeed    float64
+	MaxTilt     float64
+	TiltSpeed   float64
+	TiltDamp    float64
+	CamH        float64
+	CamD        float64
+	CamFovD     float64
+	CamYawSpeed float64
+	GhostSpeed  float64
+	GhostTimer  int
 }
 
-const (
-	mazeW = 20
-	mazeH = 21
-)
+var cfg Config
+
+func loadConfig(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("config.json не найден: %v", err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Fatalf("ошибка чтения config.json: %v", err)
+	}
+}
 
 var (
-	boardCX = float64(mazeW) * cellSize / 2
-	boardCZ = float64(mazeH) * cellSize / 2
-	camH    = 500.0
-	camD    = 340.0
-	camFovD = 420.0
+	mazeLayout []string
+	mazeW      int
+	mazeH      int
 )
 
-func project(wx, wy, wz, tiltX, tiltZ float64) (float32, float32) {
-	rx := wx - boardCX
+func loadMaze(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("maze.txt не найден: %v", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	mazeLayout = nil
+	for _, l := range lines {
+		if len(l) > 0 {
+			mazeLayout = append(mazeLayout, l)
+		}
+	}
+	mazeH = len(mazeLayout)
+	mazeW = 0
+	for _, l := range mazeLayout {
+		if len(l) > mazeW {
+			mazeW = len(l)
+		}
+	}
+}
+
+func boardCX() float64 { return float64(mazeW) * cfg.CellSize / 2 }
+func boardCZ() float64 { return float64(mazeH) * cfg.CellSize / 2 }
+
+func project(wx, wy, wz, tiltX, tiltZ, yaw float64) (float32, float32) {
+	cx, cz := boardCX(), boardCZ()
+
+	rx := wx - cx
 	ry := wy
-	rz := wz - boardCZ
+	rz := wz - cz
 
 	cosX, sinX := math.Cos(tiltX), math.Sin(tiltX)
 	ry1 := ry*cosX - rz*sinX
@@ -85,30 +105,45 @@ func project(wx, wy, wz, tiltX, tiltZ float64) (float32, float32) {
 	cosZ, sinZ := math.Cos(tiltZ), math.Sin(tiltZ)
 	rx1 := rx*cosZ - ry1*sinZ
 	ry2 := rx*sinZ + ry1*cosZ
+	rz2 := rz1
 
-	wx2 := rx1 + boardCX
+	wx2 := rx1 + cx
 	wy2 := ry2
-	wz2 := rz1 + boardCZ
+	wz2 := rz2 + cz
 
-	vx := wx2 - boardCX
-	vy := wy2 - camH
-	vz := wz2 - (boardCZ + camD)
+	eyeX := cx + math.Sin(yaw)*cfg.CamD
+	eyeY := cfg.CamH
+	eyeZ := cz + math.Cos(yaw)*cfg.CamD
 
-	fLen := math.Sqrt(camH*camH + camD*camD)
-	fwdY := -camH / fLen
-	fwdZ := -camD / fLen
-	upY := -fwdZ
-	upZ := fwdY
+	vx := wx2 - eyeX
+	vy := wy2 - eyeY
+	vz := wz2 - eyeZ
 
-	csx := vx
-	csy := vy*upY + vz*upZ
-	csz := vy*fwdY + vz*fwdZ
+	fLen := math.Sqrt(cfg.CamH*cfg.CamH + cfg.CamD*cfg.CamD)
+	fwdX := -math.Sin(yaw) * cfg.CamD / fLen
+	fwdY := -cfg.CamH / fLen
+	fwdZ := -math.Cos(yaw) * cfg.CamD / fLen
+	rightX := math.Cos(yaw)
+	rightZ := -math.Sin(yaw)
+	upX := -math.Sin(yaw) * cfg.CamH / fLen
+	upY := cfg.CamD / fLen
+	upZ := -math.Cos(yaw) * cfg.CamH / fLen
+
+	csx := vx*rightX + vz*rightZ
+	csy := vx*upX + vy*upY + vz*upZ
+	csz := vx*fwdX + vy*fwdY + vz*fwdZ
 
 	if csz < 1 {
 		csz = 1
 	}
-	scale := camFovD / csz
+	scale := cfg.CamFovD / csz
 	return float32(csx*scale + screenW/2), float32(-csy*scale + screenH/2 + 20)
+}
+
+func cellDepth(x0, x1, z0, z1, yaw float64) float64 {
+	midX := (x0+x1)/2 - boardCX()
+	midZ := (z0+z1)/2 - boardCZ()
+	return midX*math.Sin(yaw) + midZ*math.Cos(yaw)
 }
 
 func drawTri(screen *ebiten.Image, x1, y1, x2, y2, x3, y3 float32, c color.RGBA) {
@@ -130,7 +165,12 @@ func drawQuad(screen *ebiten.Image, x1, y1, x2, y2, x3, y3, x4, y4 float32, c co
 }
 
 func dk(c color.RGBA, f float64) color.RGBA {
-	return color.RGBA{uint8(float64(c.R) * f), uint8(float64(c.G) * f), uint8(float64(c.B) * f), c.A}
+	return color.RGBA{
+		uint8(float64(c.R) * f),
+		uint8(float64(c.G) * f),
+		uint8(float64(c.B) * f),
+		c.A,
+	}
 }
 
 type Ghost struct {
@@ -142,8 +182,8 @@ type Ghost struct {
 
 func newGhost(col, row int, c color.RGBA) *Ghost {
 	return &Ghost{
-		x:     float64(col)*cellSize + cellSize/2,
-		y:     float64(row)*cellSize + cellSize/2,
+		x:     float64(col)*cfg.CellSize + cfg.CellSize/2,
+		y:     float64(row)*cfg.CellSize + cfg.CellSize/2,
 		col:   c,
 		dir:   2,
 		timer: 60,
@@ -153,15 +193,18 @@ func newGhost(col, row int, c color.RGBA) *Ghost {
 type Game struct {
 	tiltX, tiltZ   float64
 	tiltVX, tiltVZ float64
+	camYaw         float64
 
 	pacX, pacY   float64
 	pacVX, pacVY float64
 	pacAngle     float64
 	pacMouthDir  float64
 
+	pacStartX, pacStartY float64
+
 	ghosts []*Ghost
 
-	cells   [mazeH][mazeW]byte
+	cells   [][]byte
 	pellets int
 	score   int
 	lives   int
@@ -169,12 +212,10 @@ type Game struct {
 	gameOver     bool
 	win          bool
 	respawnTimer int
-
-	pacStartX, pacStartY float64
 }
 
 func NewGame() *Game {
-	g := &Game{lives: 3, pacMouthDir: 1}
+	g := &Game{lives: 3, pacMouthDir: 1, camYaw: math.Pi}
 	g.initMaze()
 	return g
 }
@@ -182,6 +223,10 @@ func NewGame() *Game {
 func (g *Game) initMaze() {
 	g.pellets = 0
 	g.ghosts = nil
+	g.cells = make([][]byte, mazeH)
+	for i := range g.cells {
+		g.cells[i] = make([]byte, mazeW)
+	}
 
 	ghostColors := []color.RGBA{
 		{255, 0, 0, 255},
@@ -193,8 +238,8 @@ func (g *Game) initMaze() {
 
 	for row := 0; row < mazeH; row++ {
 		line := ""
-		if row < len(maze) {
-			line = maze[row]
+		if row < len(mazeLayout) {
+			line = mazeLayout[row]
 		}
 		for col := 0; col < mazeW; col++ {
 			var ch byte = ' '
@@ -206,8 +251,8 @@ func (g *Game) initMaze() {
 				g.cells[row][col] = '#'
 			case 'P':
 				g.cells[row][col] = ' '
-				g.pacStartX = float64(col)*cellSize + cellSize/2
-				g.pacStartY = float64(row)*cellSize + cellSize/2
+				g.pacStartX = float64(col)*cfg.CellSize + cfg.CellSize/2
+				g.pacStartY = float64(row)*cfg.CellSize + cfg.CellSize/2
 			case 'G':
 				g.cells[row][col] = ' '
 				if ghostIdx < len(ghostColors) {
@@ -240,30 +285,30 @@ func (g *Game) wall(col, row int) bool {
 }
 
 func (g *Game) wallAt(wx, wz float64) bool {
-	return g.wall(int(wx/cellSize), int(wz/cellSize))
+	return g.wall(int(wx/cfg.CellSize), int(wz/cfg.CellSize))
 }
 
 func (g *Game) updatePacman(dt float64) {
-	g.pacVX += grav * math.Sin(-g.tiltZ) * dt // минус у tiltZ
-	g.pacVY += grav * math.Sin(g.tiltX) * dt  // tiltX без минуса
-	g.pacVX *= friction
-	g.pacVY *= friction
+	g.pacVX += cfg.Gravity * math.Sin(-g.tiltZ) * dt
+	g.pacVY += cfg.Gravity * math.Sin(g.tiltX) * dt
+	g.pacVX *= cfg.Friction
+	g.pacVY *= cfg.Friction
 
 	spd := math.Hypot(g.pacVX, g.pacVY)
-	if spd > 380 {
-		g.pacVX = g.pacVX / spd * 380
-		g.pacVY = g.pacVY / spd * 380
+	if spd > cfg.MaxSpeed {
+		g.pacVX = g.pacVX / spd * cfg.MaxSpeed
+		g.pacVY = g.pacVY / spd * cfg.MaxSpeed
 	}
 
 	nx := g.pacX + g.pacVX*dt
-	if !g.wallAt(nx-pacRadius+1, g.pacY) && !g.wallAt(nx+pacRadius-1, g.pacY) {
+	if !g.wallAt(nx-cfg.PacRadius+1, g.pacY) && !g.wallAt(nx+cfg.PacRadius-1, g.pacY) {
 		g.pacX = nx
 	} else {
 		g.pacVX *= -0.25
 	}
 
 	nz := g.pacY + g.pacVY*dt
-	if !g.wallAt(g.pacX, nz-pacRadius+1) && !g.wallAt(g.pacX, nz+pacRadius-1) {
+	if !g.wallAt(g.pacX, nz-cfg.PacRadius+1) && !g.wallAt(g.pacX, nz+cfg.PacRadius-1) {
 		g.pacY = nz
 	} else {
 		g.pacVY *= -0.25
@@ -277,8 +322,8 @@ func (g *Game) updatePacman(dt float64) {
 		g.pacMouthDir = 1
 	}
 
-	col := int(g.pacX / cellSize)
-	row := int(g.pacY / cellSize)
+	col := int(g.pacX / cfg.CellSize)
+	row := int(g.pacY / cfg.CellSize)
 	if row >= 0 && row < mazeH && col >= 0 && col < mazeW {
 		switch g.cells[row][col] {
 		case '.':
@@ -300,15 +345,14 @@ func (g *Game) updatePacman(dt float64) {
 var gDirs = [][2]float64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 
 func (g *Game) updateGhosts(dt float64) {
-	const spd = 42.0
 	for _, gh := range g.ghosts {
 		gh.timer--
 		if gh.timer <= 0 {
-			gh.timer = 55
+			gh.timer = cfg.GhostTimer
 			best, bestD := -1, math.MaxFloat64
 			for i, d := range gDirs {
-				nx := gh.x + d[0]*cellSize
-				ny := gh.y + d[1]*cellSize
+				nx := gh.x + d[0]*cfg.CellSize
+				ny := gh.y + d[1]*cfg.CellSize
 				if g.wallAt(nx, ny) {
 					continue
 				}
@@ -323,8 +367,8 @@ func (g *Game) updateGhosts(dt float64) {
 			}
 		}
 		d := gDirs[gh.dir]
-		nx := gh.x + d[0]*spd*dt
-		ny := gh.y + d[1]*spd*dt
+		nx := gh.x + d[0]*cfg.GhostSpeed*dt
+		ny := gh.y + d[1]*cfg.GhostSpeed*dt
 		if !g.wallAt(nx, ny) {
 			gh.x = nx
 			gh.y = ny
@@ -332,7 +376,7 @@ func (g *Game) updateGhosts(dt float64) {
 			gh.timer = 0
 		}
 
-		if math.Hypot(gh.x-g.pacX, gh.y-g.pacY) < cellSize*0.72 {
+		if math.Hypot(gh.x-g.pacX, gh.y-g.pacY) < cfg.CellSize*0.72 {
 			g.lives--
 			if g.lives <= 0 {
 				g.gameOver = true
@@ -349,38 +393,47 @@ func (g *Game) updateGhosts(dt float64) {
 
 func (g *Game) updateTilt() {
 	const maxTV = 0.028
-
 	if ebiten.IsKeyPressed(ebiten.KeyArrowRight) {
-		g.tiltVZ += tiltSpeed
+		g.tiltVZ += cfg.TiltSpeed
 	} else if ebiten.IsKeyPressed(ebiten.KeyArrowLeft) {
-		g.tiltVZ -= tiltSpeed
+		g.tiltVZ -= cfg.TiltSpeed
 	} else {
-		g.tiltVZ *= tiltDamp
+		g.tiltVZ *= cfg.TiltDamp
 	}
-
 	if ebiten.IsKeyPressed(ebiten.KeyArrowDown) {
-		g.tiltVX += tiltSpeed
+		g.tiltVX += cfg.TiltSpeed
 	} else if ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
-		g.tiltVX -= tiltSpeed
+		g.tiltVX -= cfg.TiltSpeed
 	} else {
-		g.tiltVX *= tiltDamp
+		g.tiltVX *= cfg.TiltDamp
 	}
-
 	g.tiltVX = math.Max(-maxTV, math.Min(maxTV, g.tiltVX))
 	g.tiltVZ = math.Max(-maxTV, math.Min(maxTV, g.tiltVZ))
-	g.tiltX = math.Max(-maxTilt, math.Min(maxTilt, g.tiltX+g.tiltVX))
-	g.tiltZ = math.Max(-maxTilt, math.Min(maxTilt, g.tiltZ+g.tiltVZ))
+	g.tiltX = math.Max(-cfg.MaxTilt, math.Min(cfg.MaxTilt, g.tiltX+g.tiltVX))
+	g.tiltZ = math.Max(-cfg.MaxTilt, math.Min(cfg.MaxTilt, g.tiltZ+g.tiltVZ))
+}
+
+func (g *Game) updateCamera() {
+	if ebiten.IsKeyPressed(ebiten.KeyQ) {
+		g.camYaw -= cfg.CamYawSpeed
+	}
+	if ebiten.IsKeyPressed(ebiten.KeyE) {
+		g.camYaw += cfg.CamYawSpeed
+	}
 }
 
 func (g *Game) Update() error {
 	if ebiten.IsKeyPressed(ebiten.KeyR) {
+		yaw := g.camYaw
 		*g = *NewGame()
+		g.camYaw = yaw
 		return nil
 	}
 	if g.gameOver || g.win {
 		return nil
 	}
 	g.updateTilt()
+	g.updateCamera()
 	if g.respawnTimer > 0 {
 		g.respawnTimer--
 		return nil
@@ -399,53 +452,65 @@ type rItem struct {
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.RGBA{8, 8, 18, 255})
 
-	tx, tz := g.tiltX, g.tiltZ
-	items := make([]rItem, 0, 700)
+	tx, tz, yaw := g.tiltX, g.tiltZ, g.camYaw
+	items := make([]rItem, 0, 800)
 
 	wTop := color.RGBA{40, 100, 230, 255}
-	wFront := color.RGBA{20, 55, 125, 255}
-	wSide := color.RGBA{28, 72, 175, 255}
+	wNear := color.RGBA{20, 55, 125, 255}
+	wFar := dk(wNear, 0.75)
+	wLeft := color.RGBA{25, 65, 150, 255}
+	wRight := color.RGBA{32, 80, 190, 255}
 	flA := color.RGBA{24, 24, 55, 255}
 	flB := color.RGBA{18, 18, 42, 255}
 	pelC := color.RGBA{255, 255, 140, 255}
 
+	cs := cfg.CellSize
+	wh := cfg.WallH
+
 	for row := 0; row < mazeH; row++ {
 		for col := 0; col < mazeW; col++ {
-			x0 := float64(col) * cellSize
-			x1 := x0 + cellSize
-			z0 := float64(row) * cellSize
-			z1 := z0 + cellSize
-			dep := z0
+			x0 := float64(col) * cs
+			x1 := x0 + cs
+			z0 := float64(row) * cs
+			z1 := z0 + cs
+			dep := cellDepth(x0, x1, z0, z1, yaw)
 			r, c := row, col
 
 			if g.cells[row][col] == '#' {
 				items = append(items, rItem{dep + 20, func() {
-					ax, ay := project(x0, wallH, z0, tx, tz)
-					bx, by := project(x1, wallH, z0, tx, tz)
-					cx2, cy := project(x1, wallH, z1, tx, tz)
-					dx, dy := project(x0, wallH, z1, tx, tz)
+					ax, ay := project(x0, wh, z0, tx, tz, yaw)
+					bx, by := project(x1, wh, z0, tx, tz, yaw)
+					cx2, cy := project(x1, wh, z1, tx, tz, yaw)
+					dx, dy := project(x0, wh, z1, tx, tz, yaw)
 					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wTop)
 				}})
+				items = append(items, rItem{dep + 11, func() {
+					ax, ay := project(x0, 0, z1, tx, tz, yaw)
+					bx, by := project(x1, 0, z1, tx, tz, yaw)
+					cx2, cy := project(x1, wh, z1, tx, tz, yaw)
+					dx, dy := project(x0, wh, z1, tx, tz, yaw)
+					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wNear)
+				}})
+				items = append(items, rItem{dep + 9, func() {
+					ax, ay := project(x0, 0, z0, tx, tz, yaw)
+					bx, by := project(x1, 0, z0, tx, tz, yaw)
+					cx2, cy := project(x1, wh, z0, tx, tz, yaw)
+					dx, dy := project(x0, wh, z0, tx, tz, yaw)
+					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wFar)
+				}})
 				items = append(items, rItem{dep + 10, func() {
-					ax, ay := project(x0, 0, z1, tx, tz)
-					bx, by := project(x1, 0, z1, tx, tz)
-					cx2, cy := project(x1, wallH, z1, tx, tz)
-					dx, dy := project(x0, wallH, z1, tx, tz)
-					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wFront)
+					ax, ay := project(x1, 0, z0, tx, tz, yaw)
+					bx, by := project(x1, 0, z1, tx, tz, yaw)
+					cx2, cy := project(x1, wh, z1, tx, tz, yaw)
+					dx, dy := project(x1, wh, z0, tx, tz, yaw)
+					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wRight)
 				}})
-				items = append(items, rItem{dep + 5, func() {
-					ax, ay := project(x1, 0, z0, tx, tz)
-					bx, by := project(x1, 0, z1, tx, tz)
-					cx2, cy := project(x1, wallH, z1, tx, tz)
-					dx, dy := project(x1, wallH, z0, tx, tz)
-					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wSide)
-				}})
-				items = append(items, rItem{dep + 4, func() {
-					ax, ay := project(x0, 0, z0, tx, tz)
-					bx, by := project(x1, 0, z0, tx, tz)
-					cx2, cy := project(x1, wallH, z0, tx, tz)
-					dx, dy := project(x0, wallH, z0, tx, tz)
-					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, dk(wFront, 0.7))
+				items = append(items, rItem{dep + 10, func() {
+					ax, ay := project(x0, 0, z0, tx, tz, yaw)
+					bx, by := project(x0, 0, z1, tx, tz, yaw)
+					cx2, cy := project(x0, wh, z1, tx, tz, yaw)
+					dx, dy := project(x0, wh, z0, tx, tz, yaw)
+					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, wLeft)
 				}})
 			} else {
 				fc := flA
@@ -453,17 +518,17 @@ func (g *Game) Draw(screen *ebiten.Image) {
 					fc = flB
 				}
 				items = append(items, rItem{dep, func() {
-					ax, ay := project(x0, 0, z0, tx, tz)
-					bx, by := project(x1, 0, z0, tx, tz)
-					cx2, cy := project(x1, 0, z1, tx, tz)
-					dx, dy := project(x0, 0, z1, tx, tz)
+					ax, ay := project(x0, 0, z0, tx, tz, yaw)
+					bx, by := project(x1, 0, z0, tx, tz, yaw)
+					cx2, cy := project(x1, 0, z1, tx, tz, yaw)
+					dx, dy := project(x0, 0, z1, tx, tz, yaw)
 					drawQuad(screen, ax, ay, bx, by, cx2, cy, dx, dy, fc)
 				}})
 				if g.cells[r][c] == '.' {
 					pcx := (x0 + x1) / 2
 					pcz := (z0 + z1) / 2
 					items = append(items, rItem{dep + 3, func() {
-						px, py := project(pcx, 3, pcz, tx, tz)
+						px, py := project(pcx, 3, pcz, tx, tz, yaw)
 						vector.DrawFilledCircle(screen, px, py, 3, pelC, false)
 					}})
 				}
@@ -473,13 +538,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	for _, gh := range g.ghosts {
 		gx, gy, gc := gh.x, gh.y, gh.col
-		items = append(items, rItem{gy + 6, func() {
-			bx, by := project(gx, 16, gy, tx, tz)
+		gd := cellDepth(gx, gx, gy, gy, yaw)
+		items = append(items, rItem{gd + 6, func() {
+			bx, by := project(gx, 16, gy, tx, tz, yaw)
 			vector.DrawFilledCircle(screen, bx, by, 10, gc, false)
-			lx, ly := project(gx, 4, gy, tx, tz)
+			lx, ly := project(gx, 4, gy, tx, tz, yaw)
 			vector.DrawFilledRect(screen, lx-10, ly-3, 20, 12, gc, false)
-			e1x, e1y := project(gx-3.5, 20, gy, tx, tz)
-			e2x, e2y := project(gx+3.5, 20, gy, tx, tz)
+			e1x, e1y := project(gx-3.5, 20, gy, tx, tz, yaw)
+			e2x, e2y := project(gx+3.5, 20, gy, tx, tz, yaw)
 			vector.DrawFilledCircle(screen, e1x, e1y, 3, color.White, false)
 			vector.DrawFilledCircle(screen, e2x, e2y, 3, color.White, false)
 			vector.DrawFilledCircle(screen, e1x+1, e1y+1, 1.5, color.RGBA{0, 0, 200, 255}, false)
@@ -491,16 +557,18 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		px, py := g.pacX, g.pacY
 		vx, vy := g.pacVX, g.pacVY
 		pa := g.pacAngle
-		items = append(items, rItem{py + 9, func() {
-			sx, sy := project(px, pacRadius+1, py, tx, tz)
+		pr := cfg.PacRadius
+		pd := cellDepth(px, px, py, py, yaw)
+		items = append(items, rItem{pd + 9, func() {
+			sx, sy := project(px, pr+1, py, tx, tz, yaw)
 			facing := 0.0
 			if math.Hypot(vx, vy) > 4 {
 				facing = math.Atan2(vy, vx)
 			}
-			vector.DrawFilledCircle(screen, sx, sy, float32(pacRadius), color.RGBA{255, 220, 0, 255}, false)
+			vector.DrawFilledCircle(screen, sx, sy, float32(pr), color.RGBA{255, 220, 0, 255}, false)
 			a1 := facing + pa
 			a2 := facing - pa
-			r32 := float32(pacRadius + 1)
+			r32 := float32(pr + 1)
 			m1x := sx + float32(math.Cos(a1))*r32
 			m1y := sy + float32(math.Sin(a1))*r32
 			m2x := sx + float32(math.Cos(a2))*r32
@@ -515,9 +583,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 
 	ebitenutil.DebugPrint(screen, fmt.Sprintf(
-		"Score: %d   Lives: %d   Pellets: %d\nTilt ←→: %.1f°   Tilt ↑↓: %.1f°\n[←→↑↓] Наклон   [R] Рестарт",
+		"Score: %d   Lives: %d   Pellets: %d\nTilt ←→: %.1f°  ↑↓: %.1f°   Cam: %.0f°\n[←→↑↓] Наклон  [Q/E] Камера  [R] Рестарт",
 		g.score, g.lives, g.pellets,
 		g.tiltZ*180/math.Pi, g.tiltX*180/math.Pi,
+		math.Mod(g.camYaw*180/math.Pi, 360),
 	))
 
 	g.drawTiltHUD(screen)
@@ -537,14 +606,17 @@ func (g *Game) drawTiltHUD(screen *ebiten.Image) {
 	vector.StrokeCircle(screen, cx, cy, r, 2, color.RGBA{70, 70, 110, 200}, false)
 	vector.StrokeLine(screen, cx-r, cy, cx+r, cy, 1, color.RGBA{50, 50, 80, 160}, false)
 	vector.StrokeLine(screen, cx, cy-r, cx, cy+r, 1, color.RGBA{50, 50, 80, 160}, false)
-	bx := cx + float32(g.tiltZ/maxTilt)*r*0.82
-	by := cy + float32(g.tiltX/maxTilt)*r*0.82
+	bx := cx + float32(g.tiltZ/cfg.MaxTilt)*r*0.82
+	by := cy + float32(g.tiltX/cfg.MaxTilt)*r*0.82
 	vector.DrawFilledCircle(screen, bx, by, 9, color.RGBA{255, 220, 0, 240}, false)
 }
 
 func (g *Game) Layout(_, _ int) (int, int) { return screenW, screenH }
 
 func main() {
+	loadConfig("config.json")
+	loadMaze("maze.txt")
+
 	ebiten.SetWindowSize(screenW, screenH)
 	ebiten.SetWindowTitle("3D Pac-Man — Наклонная платформа")
 	ebiten.SetTPS(60)

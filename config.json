@@ -1,0 +1,20 @@
+{
+  "CellSize":    34.0,
+  "WallH":       22.0,
+  "PacRadius":   10.0,
+
+  "Gravity":     1400.0,
+  "Friction":    0.91,
+  "MaxSpeed":    380.0,
+  "MaxTilt":     0.38,
+  "TiltSpeed":   0.011,
+  "TiltDamp":    0.86,
+
+  "CamH":        500.0,
+  "CamD":        340.0,
+  "CamFovD":     420.0,
+  "CamYawSpeed": 0.025,
+
+  "GhostSpeed":  42.0,
+  "GhostTimer":  55
+}
